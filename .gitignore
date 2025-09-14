@@ -1,13 +1,13 @@
-# Virtual environment
+# Python & VSCode
+*.pyc
+__pycache__/
+.vscode/
+.idea/
 .venv/
 
-# Python bytecode
-__pycache__/
-*.pyc
-*.pyo
-
-# VSCode workspace/settings
-.vscode/
-
-# Shared libraries
-libstdc++.so.6.0.33
+# Output / temporary files
+test_output/
+*.wav
+*.mp3
+*.log
+*.txt
