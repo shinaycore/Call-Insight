@@ -29,7 +29,7 @@ if __name__ == "__main__":
         exit(1)
 
     # --- 2️⃣ Initialize STT node ---
-    stt_node = STTNode(model_size="small.en")  # small.en for English-only phone-call audio
+    stt_node = STTNode(model_size="small.en")  # small.en for English-only audio
 
     # --- 3️⃣ Run sequential STT ---
     stt_state = {
@@ -43,10 +43,4 @@ if __name__ == "__main__":
         print("STT failed:", stt_result["error"])
     else:
         print("STT complete!")
-        print("\nFull transcript:")
-        print(stt_result["full_text"])
-        print("\nPer-chunk transcripts:")
-        for t in stt_result["transcripts"]:
-            chunk_name = os.path.basename(t['chunk'])
-            text_preview = t['text'][:50] + ("..." if len(t['text']) > 50 else "")
-            print(f"{chunk_name} → {text_preview}")
+        print(f"\nTranscript saved at: {stt_result.get('saved_path', 'unknown')}\n")
