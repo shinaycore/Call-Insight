@@ -8,18 +8,11 @@ logger = get_logger(__name__)
 
 class STTNode:
     def __init__(self, model_size: str = "small.en"):
-        """
-        Potato-friendly Whisper STT node: single model, CPU only.
-        Defaults to small.en for better accuracy on phone call audio.
-        """
         logger.info(f"Loading Whisper model ({model_size}, device=cpu)...")
         self.model = whisper.load_model(model_size, device="cpu")  # force CPU
         logger.info("Whisper model loaded successfully.")
 
     def transcribe_chunk(self, chunk_path: str) -> Dict[str, str]:
-        """
-        Transcribe a single audio chunk sequentially.
-        """
         try:
             logger.info(f"Transcribing chunk: {chunk_path}")
             result = self.model.transcribe(chunk_path)
@@ -29,14 +22,23 @@ class STTNode:
             logger.error(f"Failed to transcribe {chunk_path}: {e}")
             return {"chunk": chunk_path, "text": "", "error": str(e)}
 
+    def save_transcript(self, text: str, request_id: Optional[str] = None, folder: str = "transcripts") -> str:
+        try:
+            os.makedirs(folder, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"transcript_{request_id}_{timestamp}.txt" if request_id else f"transcript_{timestamp}.txt"
+            output_path = os.path.join(folder, filename)
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(text)
+            logger.info(f"Transcript saved: {output_path}")
+            return output_path
+        except Exception as e:
+            logger.error(f"Error saving transcript: {e}")
+            raise
+
     def stt_node(
         self, state: Dict[str, Any], config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Node interface for your pipeline.
-        Expects `state["chunks"]` to be a list of file paths.
-        Runs **sequentially** for low-spec PCs.
-        """
         start_ts = datetime.utcnow()
         try:
             chunks = state.get("chunks")
@@ -48,12 +50,16 @@ class STTNode:
 
             full_text = " ".join([t["text"] for t in transcripts if "text" in t])
 
+            # --- save full transcript automatically ---
+            saved_path = self.save_transcript(full_text, request_id=state.get("request_id"))
+
             result = {
                 "transcripts": transcripts,        # per-chunk transcripts
                 "full_text": full_text,            # merged transcript
                 "num_chunks": len(chunks),
                 "processing_duration": (datetime.utcnow() - start_ts).total_seconds(),
-                "request_id": state.get("request_id")
+                "request_id": state.get("request_id"),
+                "saved_path": saved_path           # path where transcript was saved
             }
 
             logger.info(f"STT node completed for request_id={state.get('request_id')}")
