@@ -1,0 +1,7 @@
+{
+  "model": "facebook/bart-large-cnn",
+  "local_model_path": "/home/shinay/models/bart-large-cnn",
+  "results_dir": "summarization_results",
+  "max_input_length": 1024,
+  "chunk_size": 600
+}

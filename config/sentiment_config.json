@@ -1,0 +1,6 @@
+{
+    "model": "j-hartmann/emotion-english-distilroberta-base",
+    "task_type": "emotion",  
+    "save_results": true,
+    "results_dir": "sentiment_results"
+}
