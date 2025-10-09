@@ -1,108 +1,124 @@
 # nodes/text_preprocessing.py
-# Reads your Whisper transcript JSON (diarized_transcript.json).
-# Cleans filler words, elongated sounds, and interjections.
-# Normalizes whitespace and merges speaker text.
-# Saves preprocessed speaker-wise JSON in preprocessed_results/.
-# Prints a preview (first 200 chars) per speaker.
-
 import re
+import json
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from collections import Counter
 
 import spacy
+from presidio_analyzer import AnalyzerEngine
+from presidio_anonymizer import AnonymizerEngine
+
 from utils.logger import get_logger
 from utils.json_reader import load_json
 
 logger = get_logger(__name__)
 
-# Load spaCy English model once
-try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    raise OSError(
-        "spaCy model 'en_core_web_sm' not found. Run:\n"
-        "python -m spacy download en_core_web_sm"
-    )
-
 
 class TextPreprocessor:
-    """
-    Preprocess Whisper transcripts:
-    - Remove common and dynamic fillers
-    - Remove elongated sounds
-    - Normalize whitespace
-    """
-
-    def __init__(self, results_dir: str = "preprocessed_results"):
+    """Preprocess transcripts: clean text, remove fillers, redact PII"""
+    
+    def __init__(self, results_dir: str = "preprocessed_results", redact_pii: bool = True):
         self.results_dir = Path(results_dir)
         self.results_dir.mkdir(parents=True, exist_ok=True)
-
+        self.redact_pii = redact_pii
+        
+        # Load models
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+            if redact_pii:
+                self.analyzer = AnalyzerEngine()
+                self.anonymizer = AnonymizerEngine()
+                logger.info("Models loaded: spaCy + Presidio")
+        except OSError:
+            raise OSError("Run: python -m spacy download en_core_web_sm")
+    
     def clean_text(self, text: str) -> str:
-        """
-        Basic text cleaning:
-        - Lowercase
-        - Remove elongated sounds (uhhh, ummm, hmm)
-        - Normalize spaces
-        """
+        """Remove elongated sounds, normalize whitespace"""
         text = text.lower()
-        # Remove elongated sounds like uhh, ummm, ahh, ohhh
-        text = re.sub(r'\b(u+h+|m+h+|h+m+|a+h+|o+h+)\b', '', text)
-        # Remove extra spaces
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
-
-    def remove_fillers(self, text: str, dynamic_fillers: List[str] = None) -> str:
-        """
-        Remove interjections and dynamic fillers using spaCy + frequency analysis
-        dynamic_fillers: list of additional filler words to remove
-        """
-        doc = nlp(text)
-        tokens = []
-        word_list = [t.text for t in doc if not t.is_punct]
-
-        # Frequency-based dynamic filler detection
-        if dynamic_fillers is None:
-            counter = Counter(word_list)
-            total_words = len(word_list)
-            dynamic_fillers = {word for word, count in counter.items()
-                               if len(word) <= 3 and count / total_words > 0.1}  # heuristic
-
-        for token in doc:
-            # Remove POS-based interjections, punctuation, and dynamic fillers
-            if token.pos_ == "INTJ":
-                continue
-            if token.text in dynamic_fillers:
-                continue
-            if token.is_punct or token.is_space:
-                continue
-            tokens.append(token.text)
-
+        text = re.sub(r'\b(u+h+|m+h+|h+m+|a+h+|o+h+|e+r+)\b', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'([.!?,;:]){2,}', r'\1', text)
+        return re.sub(r'\s+', ' ', text).strip()
+    
+    def remove_fillers(self, text: str) -> str:
+        """Remove interjections and repetitive short words"""
+        doc = self.nlp(text)
+        words = [t.text for t in doc if not t.is_punct]
+        
+        # Find frequent short words (dynamic fillers)
+        counter = Counter(words)
+        total = len(words)
+        dynamic_fillers = {w for w, c in counter.items() if len(w) <= 3 and c / max(total, 1) > 0.1}
+        
+        # Common fillers
+        all_fillers = dynamic_fillers | {"like", "you know", "i mean", "sort of", "kind of", "actually", "basically"}
+        
+        # Filter tokens
+        tokens = [t.text for t in doc if t.pos_ != "INTJ" and t.text.lower() not in all_fillers and not t.is_punct and not t.is_space]
         return " ".join(tokens)
-
+    
+    def redact_pii_text(self, text: str) -> Dict[str, Any]:
+        """Redact PII and return redacted text + entities found"""
+        if not self.redact_pii or not text.strip():
+            return {"text": text, "entities": []}
+        
+        try:
+            results = self.analyzer.analyze(text=text, language="en")
+            anonymized = self.anonymizer.anonymize(text=text, analyzer_results=results)
+            entities = [{"type": r.entity_type, "score": r.score} for r in results]
+            return {"text": anonymized.text, "entities": entities}
+        except Exception as e:
+            logger.error(f"PII redaction failed: {e}")
+            return {"text": text, "entities": []}
+    
     def preprocess_transcript(self, transcript_json: str, request_id: str = "test") -> Dict[str, Any]:
-        """
-        Load Whisper transcript JSON and preprocess text speaker-wise
-        Returns dict: {speaker: cleaned_text}
-        """
+        """Load transcript, clean, remove fillers, redact PII per speaker"""
+        logger.info(f"Processing transcript: {request_id}")
+        
         transcript = load_json(transcript_json)
         speaker_texts = {}
+        pii_summary = {}
+        
         for entry in transcript:
             speaker = entry.get("speaker", "unknown")
-            raw_text = entry.get("text", "")
-            cleaned = self.clean_text(raw_text)
+            raw = entry.get("text", "")
+            
+            if len(raw.strip()) < 10:
+                continue
+            
+            # Clean -> Remove fillers -> Redact PII
+            cleaned = self.clean_text(raw)
             cleaned = self.remove_fillers(cleaned)
-            speaker_texts.setdefault(speaker, []).append(cleaned)
-
+            redacted = self.redact_pii_text(cleaned)
+            
+            # Track PII per speaker
+            if redacted["entities"]:
+                pii_summary.setdefault(speaker, []).extend(redacted["entities"])
+            
+            speaker_texts.setdefault(speaker, []).append(redacted["text"])
+        
         # Merge per speaker
-        for spk in speaker_texts:
-            speaker_texts[spk] = " ".join(speaker_texts[spk])
-
-        # Save preprocessed JSON
+        speaker_texts = {spk: " ".join(texts) for spk, texts in speaker_texts.items()}
+        
+        # PII stats
+        pii_stats = {spk: dict(Counter(e["type"] for e in ents)) for spk, ents in pii_summary.items()}
+        
+        # Save output
+        output = {
+            "request_id": request_id,
+            "speaker_texts": speaker_texts,
+            "pii_stats": pii_stats
+        }
+        
         save_path = self.results_dir / f"preprocessed_transcript_{request_id}.json"
-        import json
         with open(save_path, "w", encoding="utf-8") as f:
-            json.dump(speaker_texts, f, indent=2, ensure_ascii=False)
-
-        logger.info(f"Preprocessed transcript saved: {save_path}")
-        return {"speaker_texts": speaker_texts, "saved_json_path": str(save_path)}
+            json.dump(output, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Saved: {save_path}")
+        
+        # Preview
+        for speaker, text in speaker_texts.items():
+            preview = text[:200] + "..." if len(text) > 200 else text
+            logger.info(f"[{speaker}] {preview}")
+        
+        return {"speaker_texts": speaker_texts, "pii_summary": pii_stats, "saved_json_path": str(save_path)}
