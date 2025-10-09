@@ -1,46 +1,28 @@
-from nodes.Preprocessing import audio_preprocess_node
-from nodes.stt_node import STTNode
-import os
+from nodes.summariser_node import SummarizationNode
 
 if __name__ == "__main__":
-    # --- 1️⃣ Audio preprocessing ---
-    input_audio = "/home/shinay/Downloads/How to stay calm when you know you'll be stressed Daniel Levitin TED.mp3"
+    # Paths
+    txt_file = "/home/shinay/Documents/PROJECTS/Call_Insight/transcripts/transcript_test123_20250914_140137.txt"
+    transcript_json = "/home/shinay/Documents/PROJECTS/Call_Insight/diarized_transcript.json"
 
-    preproc_state = audio_preprocess_node({
-        "input_path": input_audio,
-        "target_sr": 16000,
-        "do_noise_reduction": True,
-        "do_trim": True,
-        "do_segment": True,        # segment into chunks
-        "chunk_length": 60,        # seconds per chunk
-        "overlap": 2,              # seconds overlap
-        "out_folder": "test_output",
-        "request_id": "test123"
-    })
+    # Initialize summarizer node
+    summarizer = SummarizationNode()
 
-    if "error" in preproc_state:
-        print("Preprocessing failed:", preproc_state["error"])
-        exit(1)
+    # Run summarization
+    result = summarizer.summarize_node(txt_file=txt_file, transcript_json=transcript_json, request_id="test123")
 
-    chunks = preproc_state.get("chunks", [])
-    print(f"Preprocessing complete. {len(chunks)} chunks ready for transcription.")
-    if not chunks:
-        print("No chunks were created. Exiting.")
-        exit(1)
+    # Global summary
+    print("\n=== Global Summary ===\n")
+    print(result.get("global_summary", "No summary generated."))
 
-    # --- 2️⃣ Initialize STT node ---
-    stt_node = STTNode(model_size="small.en")  # small.en for English-only audio
-
-    # --- 3️⃣ Run sequential STT ---
-    stt_state = {
-        "chunks": chunks,
-        "request_id": "test123"
-    }
-
-    stt_result = stt_node.stt_node(stt_state)
-
-    if "error" in stt_result:
-        print("STT failed:", stt_result["error"])
+    # Speaker-wise summaries
+    print("\n=== Speaker-wise Summaries ===\n")
+    speaker_summaries = result.get("speaker_summaries", {})
+    if speaker_summaries:
+        for spk, summary in speaker_summaries.items():
+            print(f"[{spk}] {summary}")
     else:
-        print("STT complete!")
-        print(f"\nTranscript saved at: {stt_result.get('saved_path', 'unknown')}\n")
+        print("No speaker-wise summaries generated.")
+
+    # Saved JSON
+    print(f"\nSaved JSON path: {result.get('saved_path', 'No file saved.')}")

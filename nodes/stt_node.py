@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 import whisper
@@ -22,16 +23,36 @@ class STTNode:
             logger.error(f"Failed to transcribe {chunk_path}: {e}")
             return {"chunk": chunk_path, "text": "", "error": str(e)}
 
-    def save_transcript(self, text: str, request_id: Optional[str] = None, folder: str = "transcripts") -> str:
+    def save_transcript(
+        self, 
+        text: str, 
+        transcripts: List[Dict[str, str]], 
+        request_id: Optional[str] = None, 
+        folder: str = "transcripts"
+    ) -> Dict[str, str]:
+        """
+        Saves full transcript as .txt and per-chunk results as .json
+        Returns dict with both paths.
+        """
         try:
             os.makedirs(folder, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"transcript_{request_id}_{timestamp}.txt" if request_id else f"transcript_{timestamp}.txt"
-            output_path = os.path.join(folder, filename)
-            with open(output_path, "w", encoding="utf-8") as f:
-                f.write(text)
-            logger.info(f"Transcript saved: {output_path}")
-            return output_path
+
+            base_name = f"transcript_{request_id}_{timestamp}" if request_id else f"transcript_{timestamp}"
+
+            # Save full transcript (txt)
+            txt_path = os.path.join(folder, f"{base_name}.txt")
+            with open(txt_path, "w", encoding="utf-8") as f:
+                f.write(text.replace(". ", ".\n"))
+
+            # Save per-chunk transcripts (json)
+            json_path = os.path.join(folder, f"{base_name}.json")
+            with open(json_path, "w", encoding="utf-8") as jf:
+                json.dump(transcripts, jf, indent=2, ensure_ascii=False)
+
+            logger.info(f"Transcript saved: {txt_path} and {json_path}")
+            return {"txt_path": txt_path, "json_path": json_path}
+
         except Exception as e:
             logger.error(f"Error saving transcript: {e}")
             raise
@@ -48,10 +69,13 @@ class STTNode:
             logger.info(f"Starting sequential transcription on {len(chunks)} chunks...")
             transcripts = [self.transcribe_chunk(c) for c in chunks]
 
-            full_text = " ".join([t["text"] for t in transcripts if "text" in t])
+            # Merge only non-empty texts
+            full_text = " ".join([t["text"] for t in transcripts if t.get("text")])
 
-            # --- save full transcript automatically ---
-            saved_path = self.save_transcript(full_text, request_id=state.get("request_id"))
+            # Save both full transcript + per-chunk transcripts
+            saved_paths = self.save_transcript(
+                full_text, transcripts, request_id=state.get("request_id")
+            )
 
             result = {
                 "transcripts": transcripts,        # per-chunk transcripts
@@ -59,7 +83,7 @@ class STTNode:
                 "num_chunks": len(chunks),
                 "processing_duration": (datetime.utcnow() - start_ts).total_seconds(),
                 "request_id": state.get("request_id"),
-                "saved_path": saved_path           # path where transcript was saved
+                "saved_paths": saved_paths         # dict with txt + json paths
             }
 
             logger.info(f"STT node completed for request_id={state.get('request_id')}")

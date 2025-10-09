@@ -130,7 +130,6 @@ class audio_preprocessing:
 _processor = audio_preprocessing()
 
 def audio_preprocess_node(state: Dict[str, Any], config: Optional[Dict[str, Any]] = None, runtime=None) -> Dict[str, Any]:
-
     start_ts = datetime.utcnow()
     try:
         # required input
@@ -142,13 +141,12 @@ def audio_preprocess_node(state: Dict[str, Any], config: Optional[Dict[str, Any]
         target_sr = int(state.get("target_sr", 16000))
         do_noise = bool(state.get("do_noise_reduction", False))
         do_trim = bool(state.get("do_trim", True))
-        do_segment = bool(state.get("do_segment", False))
-        chunk_length = int(state.get("chunk_length", 60))
-        overlap = int(state.get("overlap", 2))
         out_folder = state.get("out_folder", "preprocessed_audio")
         request_id = state.get("request_id")
 
-        # idempotency: if we already have an out file for this request_id, skip.
+        os.makedirs(out_folder, exist_ok=True)
+
+        # idempotency: if file already exists, skip processing
         if request_id:
             possible = os.path.join(out_folder, f"audio_{request_id}.wav")
             if os.path.exists(possible):
@@ -164,48 +162,31 @@ def audio_preprocess_node(state: Dict[str, Any], config: Optional[Dict[str, Any]
         # 1) load
         audio, sr = _processor.load_audio(input_path, target_sr=target_sr)
 
-        # 2) noise reduction (optional)
+        # 2) noise reduction
         if do_noise:
             audio = _processor.noise_reduction(audio, sr=sr)
 
-        # 3) trim silence (optional)
+        # 3) trim silence
         if do_trim:
             audio = _processor.remove_long_silences(audio, sr=sr)
 
+        # 4) save preprocessed file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"audio_{request_id}_{timestamp}.wav" if request_id else f"audio_{timestamp}.wav"
+        out_path = os.path.join(out_folder, filename)
+        sf.write(out_path, audio, sr, subtype="PCM_16")
+        logger.info(f"Preprocessed audio saved: {out_path}")
+
         duration = len(audio) / sr
 
-        # 4) save (and optionally segment)
-        if do_segment:
-            chunks = _processor.segment_and_save_audio(
-                audio=audio, sr=sr, chunk_length=chunk_length, overlap=overlap, base_folder=out_folder
-            )
-            result = {
-                "chunks": chunks,
-                "sr": sr,
-                "duration": duration,
-                "processing_duration": (datetime.utcnow() - start_ts).total_seconds(),
-                "request_id": request_id
-            }
-            return result
-        else:
-            # segment the audio and save chunks
-            chunks = _processor.segment_and_save_audio(
-                audio=audio,
-                sr=sr,
-                chunk_length=chunk_length,
-                overlap=overlap,
-                base_folder=out_folder
-            )
-            result = {
-                "chunks": chunks,
-                "sr": sr,
-                "duration": duration,
-                "processing_duration": (datetime.utcnow() - start_ts).total_seconds(),
-                "request_id": request_id
-            }
-            return result
+        return {
+            "out_path": out_path,
+            "sr": sr,
+            "duration": duration,
+            "processing_duration": (datetime.utcnow() - start_ts).total_seconds(),
+            "request_id": request_id
+        }
 
     except Exception as exc:
         logger.error(f"audio_preprocess_node failed: {exc}")
         return {"error": f"{type(exc).__name__}: {str(exc)}", "request_id": state.get("request_id")}
-    
