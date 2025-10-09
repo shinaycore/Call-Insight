@@ -1,64 +1,79 @@
 import os
 import json
-from typing import Dict, Any, List
 from datetime import datetime
-from transformers import pipeline, AutoTokenizer, AutoModelForSeq2SeqLM
-from concurrent.futures import ProcessPoolExecutor
+from typing import List, Dict, Any
+import requests
 from utils.logger import get_logger
 from utils.json_reader import load_json
 
+from dotenv import load_dotenv
+load_dotenv()  # this will load .env vars
+
+
 logger = get_logger(__name__)
 
-# === Top-level function for multiprocessing (must be top-level to be picklable) ===
-def summarize_chunk(args):
-    text, model_path = args
-    if model_path and os.path.exists(model_path):
-        tokenizer = AutoTokenizer.from_pretrained(model_path)
-        model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
-        summarizer = pipeline("summarization", model=model, tokenizer=tokenizer)
-    else:
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
-    
-    # truncate if too long
-    max_input_length = 1024
-    if len(text.split()) > max_input_length:
-        text = " ".join(text.split()[:max_input_length])
-    
-    summary = summarizer(text, max_length=150, min_length=50, do_sample=False)
-    return summary[0]["summary_text"]
+from dotenv import load_dotenv
+import os
+from pathlib import Path
 
-# === Node Class ===
 class SummarizationNode:
-    def __init__(self, config_path: str = "config/summarization_config.json"):
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-        self.config = load_json(config_path)
-
-        self.max_input_length = self.config.get("max_input_length", 1024)
-        self.local_model_path = self.config.get("local_model_path", None)
-
-        self.results_dir = self.config.get("results_dir", "summarization_results")
+    def __init__(self, results_dir: str = "summarization_results", chunk_size: int = 400):
+        """
+        Summarization node using OpenRouter free model: openai/gpt-oss-20b
+        chunk_size: max words per chunk to prevent memory spikes
+        """
+        # Load environment variables from .env file
+        env_path = Path(__file__).parent / ".env"
+        load_dotenv(env_path, override=True)
+        
+        # Get API key from environment
+        self.api_key = os.getenv("OPENROUTER_API_KEY")
+        
+        # Validate API key was loaded
+        if not self.api_key:
+            raise ValueError("OPENROUTER_API_KEY not found in environment variables. Check your .env file.")
+        
+        self.model_name = "openai/gpt-oss-20b:free"
+        self.chunk_size = chunk_size
+        self.results_dir = results_dir
         os.makedirs(self.results_dir, exist_ok=True)
+        self.endpoint = "https://openrouter.ai/api/v1/chat/completions"  # OpenRouter endpoint
 
-    def split_text_into_chunks(self, text: str, chunk_size: int = 500):
+        
+    def split_text_into_chunks(self, text: str) -> List[str]:
         words = text.split()
-        return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+        return [" ".join(words[i:i+self.chunk_size]) for i in range(0, len(words), self.chunk_size)]
 
-    def global_summarize(self, text_file: str) -> str:
-        # Read text from file
-        with open(text_file, "r", encoding="utf-8") as f:
-            content = f.read()
-        
-        chunks = self.split_text_into_chunks(content)
-        logger.info(f"Text split into {len(chunks)} chunks for parallel summarization.")
+    def summarize_text(self, text: str) -> str:
+        """
+        Summarize a chunk into bullet points using OpenRouter.
+        """
+        prompt = f"Summarize the following conversation into concise bullet points:\n{text}"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant that summarizes meetings into clear bullet points."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 500
+        }
+        response = requests.post(self.endpoint, headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
 
-        with ProcessPoolExecutor() as executor:
-            summaries = list(executor.map(summarize_chunk, [(c, self.local_model_path) for c in chunks]))
-        
-        # Combine chunk summaries
-        return " ".join(summaries)
+    def hierarchical_summarize(self, text: str) -> str:
+        chunks = self.split_text_into_chunks(text)
+        logger.info(f"Splitting text into {len(chunks)} chunks for summarization.")
+        chunk_summaries = [self.summarize_text(c) for c in chunks]
+        combined = " ".join(chunk_summaries)
+        final_summary = self.summarize_text(combined)
+        return final_summary
 
-    def speaker_wise_summarize(self, transcript: List[Dict[str, str]]) -> Dict[str, str]:
+    def speaker_wise_summarize(self, transcript: List[Dict[str, Any]]) -> Dict[str, str]:
         speaker_texts = {}
         for entry in transcript:
             speaker = entry.get("speaker", "unknown")
@@ -66,37 +81,41 @@ class SummarizationNode:
 
         speaker_summaries = {}
         for spk, texts in speaker_texts.items():
-            chunks = self.split_text_into_chunks(" ".join(texts))
-            with ProcessPoolExecutor() as executor:
-                summaries = list(executor.map(summarize_chunk, [(c, self.local_model_path) for c in chunks]))
-            speaker_summaries[spk] = " ".join(summaries)
+            merged_text = " ".join(texts)
+            speaker_summaries[spk] = self.hierarchical_summarize(merged_text)
 
         return speaker_summaries
 
     def summarize_node(self, txt_file: str, transcript_json: str, request_id: str = "test") -> Dict[str, Any]:
         try:
-            # Global summary from text file
-            global_summary = self.global_summarize(txt_file)
+            with open(txt_file, "r", encoding="utf-8") as f:
+                text = f.read()
 
-            # Speaker-wise summary from JSON
+            global_notes = self.hierarchical_summarize(text)
             transcript = load_json(transcript_json)
-            speaker_summaries = self.speaker_wise_summarize(transcript)
+            speaker_notes = self.speaker_wise_summarize(transcript)
 
-            # Save results
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             json_path = os.path.join(self.results_dir, f"summary_{request_id}_{timestamp}.json")
             with open(json_path, "w", encoding="utf-8") as jf:
                 json.dump({
-                    "global_summary": global_summary,
-                    "speaker_summaries": speaker_summaries
+                    "global_notes": global_notes,
+                    "speaker_notes": speaker_notes
                 }, jf, indent=2, ensure_ascii=False)
 
-            logger.info(f"Summarization results saved: {json_path}")
+            txt_path = os.path.join(self.results_dir, f"summary_{request_id}_{timestamp}.txt")
+            with open(txt_path, "w", encoding="utf-8") as tf:
+                tf.write("Global Notes:\n")
+                tf.write(global_notes + "\n\nSpeaker Notes:\n")
+                for spk, notes in speaker_notes.items():
+                    tf.write(f"{spk}:\n{notes}\n\n")
+
+            logger.info(f"Summarization results saved: {json_path} and {txt_path}")
             return {
                 "request_id": request_id,
-                "global_summary": global_summary,
-                "speaker_summaries": speaker_summaries,
-                "saved_path": json_path
+                "global_notes": global_notes,
+                "speaker_notes": speaker_notes,
+                "saved_paths": {"json": json_path, "txt": txt_path}
             }
 
         except Exception as e:
