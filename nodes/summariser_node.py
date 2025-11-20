@@ -1,123 +1,296 @@
-import os
+import hashlib
 import json
+import os
+import random
+import time
 from datetime import datetime
-from typing import List, Dict, Any
+from pathlib import Path
+from typing import Any, Dict
+
 import requests
-from utils.logger import get_logger
-from utils.json_reader import load_json
-
 from dotenv import load_dotenv
-load_dotenv()  # this will load .env vars
-
+from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-from dotenv import load_dotenv
-import os
-from pathlib import Path
+DEBUG_LOG = Path("summarizer_debug.log")
+
 
 class SummarizationNode:
-    def __init__(self, results_dir: str = "summarization_results", chunk_size: int = 400):
+    def __init__(self, results_dir: str = "summarization_results"):
         """
-        Summarization node using OpenRouter free model: openai/gpt-oss-20b
-        chunk_size: max words per chunk to prevent memory spikes
+        FINAL version:
+        - Reads ONLY preprocessed .txt
+        - Speaker-level summary
+        - Global summary
+        - Anti-hallucination fallback logic
+        - Debug logging
         """
-        # Load environment variables from .env file
-        env_path = Path(__file__).parent / ".env"
-        load_dotenv(env_path, override=True)
-        
-        # Get API key from environment
+        root_env = Path(__file__).resolve().parents[1] / ".env"
+        load_dotenv(root_env, override=True)
+
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        
-        # Validate API key was loaded
         if not self.api_key:
-            raise ValueError("OPENROUTER_API_KEY not found in environment variables. Check your .env file.")
-        
-        self.model_name = "openai/gpt-oss-20b:free"
-        self.chunk_size = chunk_size
+            raise ValueError("OPENROUTER_API_KEY missing in .env")
+
+        self.model = "mistralai/mistral-7b-instruct:free"
+        self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
+
         self.results_dir = results_dir
-        os.makedirs(self.results_dir, exist_ok=True)
-        self.endpoint = "https://openrouter.ai/api/v1/chat/completions"  # OpenRouter endpoint
+        Path(self.results_dir).mkdir(exist_ok=True)
 
-        
-    def split_text_into_chunks(self, text: str) -> List[str]:
-        words = text.split()
-        return [" ".join(words[i:i+self.chunk_size]) for i in range(0, len(words), self.chunk_size)]
+        self.cache_dir = Path("cache_summaries")
+        self.cache_dir.mkdir(exist_ok=True)
 
-    def summarize_text(self, text: str) -> str:
-        """
-        Summarize a chunk into bullet points using OpenRouter.
-        """
-        prompt = f"Summarize the following conversation into concise bullet points:\n{text}"
+    # -----------------------------
+    # Debug logger
+    # -----------------------------
+    def _append_debug(self, text: str):
+        try:
+            with open(DEBUG_LOG, "a", encoding="utf-8") as df:
+                df.write(f"{datetime.now().isoformat()} {text}\n")
+        except Exception:
+            pass
+
+    # -----------------------------
+    # Minimal TXT parser
+    # -----------------------------
+    def _parse_preprocessed_txt(self, txt_file: str) -> Dict[str, str]:
+        with open(txt_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        speakers = {}
+        current = None
+        buffer = []
+
+        for line in content.splitlines():
+            line = line.strip()
+
+            # Speaker headers like "JAYDEN:"
+            if line.endswith(":") and line[:-1].isalpha():
+                if current and buffer:
+                    speakers[current] = "\n".join(buffer).strip()
+                current = line[:-1].lower()
+                buffer = []
+                continue
+
+            if line.startswith("PII SUMMARY"):
+                break
+
+            if current:
+                if line:
+                    buffer.append(line)
+
+        if current and buffer:
+            speakers[current] = "\n".join(buffer).strip()
+
+        return speakers
+
+    # -----------------------------
+    # Internal helpers
+    # -----------------------------
+    def _hash_text(self, text: str) -> str:
+        return hashlib.sha256(text.encode()).hexdigest()
+
+    def _load_cache(self, h: str):
+        p = self.cache_dir / f"{h}.txt"
+        return p.read_text() if p.exists() else None
+
+    def _save_cache(self, h: str, text: str):
+        (self.cache_dir / f"{h}.txt").write_text(text)
+
+    # -----------------------------
+    # API Wrapper + Debug
+    # -----------------------------
+    def _chat_request(self, prompt: str, max_tokens: int = 300) -> str:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "HTTP-Referer": "http://localhost",
+            "X-Title": "CallInsightApp",
         }
+
         payload = {
-            "model": self.model_name,
+            "model": self.model,
             "messages": [
-                {"role": "system", "content": "You are a helpful assistant that summarizes meetings into clear bullet points."},
-                {"role": "user", "content": prompt}
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize ONLY what is explicitly written.\n"
+                        "Never add tasks, projects, meetings, or invented info.\n"
+                        "If unclear: return NO CONTENT FOUND.\n"
+                    ),
+                },
+                {"role": "user", "content": prompt},
             ],
-            "max_tokens": 500
+            "temperature": 0,
+            "max_tokens": max_tokens,
         }
-        response = requests.post(self.endpoint, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()["choices"][0]["message"]["content"]
 
-    def hierarchical_summarize(self, text: str) -> str:
-        chunks = self.split_text_into_chunks(text)
-        logger.info(f"Splitting text into {len(chunks)} chunks for summarization.")
-        chunk_summaries = [self.summarize_text(c) for c in chunks]
-        combined = " ".join(chunk_summaries)
-        final_summary = self.summarize_text(combined)
-        return final_summary
+        self._append_debug(
+            f"SEND prompt_len={len(prompt)} prompt_snip={prompt[:500]!r}"
+        )
 
-    def speaker_wise_summarize(self, transcript: List[Dict[str, Any]]) -> Dict[str, str]:
-        speaker_texts = {}
-        for entry in transcript:
-            speaker = entry.get("speaker", "unknown")
-            speaker_texts.setdefault(speaker, []).append(entry.get("text", ""))
+        retries, backoff = 5, 2
 
-        speaker_summaries = {}
-        for spk, texts in speaker_texts.items():
-            merged_text = " ".join(texts)
-            speaker_summaries[spk] = self.hierarchical_summarize(merged_text)
+        for attempt in range(retries):
+            try:
+                resp = requests.post(
+                    self.endpoint, headers=headers, json=payload, timeout=60
+                )
 
-        return speaker_summaries
+                snip = resp.text[:500]
+                self._append_debug(f"RESP status={resp.status_code} body_snip={snip!r}")
 
-    def summarize_node(self, txt_file: str, transcript_json: str, request_id: str = "test") -> Dict[str, Any]:
+                if resp.status_code == 429:
+                    wait = backoff + random.random()
+                    time.sleep(wait)
+                    backoff *= 2
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                msg = (
+                    (data.get("choices") or [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+
+                self._append_debug(f"FINAL_CONTENT len={len(msg)} snip={msg[:500]!r}")
+                return msg.strip()
+
+            except Exception as e:
+                self._append_debug(f"ERROR attempt={attempt} exc={repr(e)}")
+                if attempt == retries - 1:
+                    return ""
+                time.sleep(backoff)
+                backoff *= 2
+
+        return ""
+
+    # -----------------------------
+    # Fallback summarization logic
+    # -----------------------------
+    def summarize_speaker_block(self, speaker: str, text: str) -> str:
+        if not text.strip():
+            return "NO CONTENT FOUND."
+
+        strict_prompt = (
+            f"Summarize EVERYTHING said by {speaker}.\n"
+            "- Only literal content.\n"
+            "- No hallucinations.\n"
+            "- 5–8 bullet points.\n\n"
+            f"TEXT:\n{text}"
+        )
+
+        h = self._hash_text(strict_prompt)
+        cached = self._load_cache(h)
+        if cached and cached.strip():
+            return cached
+
+        result = self._chat_request(strict_prompt)
+        if result and result.strip() and "NO CONTENT FOUND" not in result.upper():
+            self._save_cache(h, result)
+            return result
+
+        # fallback prompt
+        fallback_prompt = (
+            f"Extract 4–6 literal statements from the text.\n"
+            "Write exactly what the speaker says.\n"
+            "If impossible: NO CONTENT FOUND.\n\n"
+            f"TEXT:\n{text}"
+        )
+
+        result2 = self._chat_request(fallback_prompt)
+        if result2 and result2.strip() and "NO CONTENT FOUND" not in result2.upper():
+            self._save_cache(h, result2)
+            return result2
+
+        # literal emergency fallback
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if lines:
+            return "Literal excerpt:\n" + "\n".join(lines[:3])
+
+        return "NO CONTENT FOUND."
+
+    # -----------------------------
+    # Global summary
+    # -----------------------------
+    def global_summary(self, text: str) -> str:
+        if not text.strip():
+            return "NO CONTENT FOUND."
+
+        prompt = (
+            "Summarize this conversation.\n"
+            "- Only literal facts.\n"
+            "- No hallucinations.\n"
+            "- 6–10 bullet points.\n\n"
+            f"{text}"
+        )
+
+        result = self._chat_request(prompt, max_tokens=400)
+        if result and result.strip() and "NO CONTENT FOUND" not in result.upper():
+            return result
+
+        # fallback literal extraction
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if lines:
+            return "Literal combined excerpts:\n" + "\n".join(lines[:8])
+
+        return "NO CONTENT FOUND."
+
+    # -----------------------------
+    # Main node caller
+    # -----------------------------
+    def summarize_node(self, txt_file: str, transcript_json=None, request_id="summary"):
         try:
-            with open(txt_file, "r", encoding="utf-8") as f:
-                text = f.read()
+            logger.info(f"Reading TXT: {txt_file}")
+            speaker_blocks = self._parse_preprocessed_txt(txt_file)
 
-            global_notes = self.hierarchical_summarize(text)
-            transcript = load_json(transcript_json)
-            speaker_notes = self.speaker_wise_summarize(transcript)
+            if not speaker_blocks:
+                raise ValueError("No speakers found in TXT file.")
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            json_path = os.path.join(self.results_dir, f"summary_{request_id}_{timestamp}.json")
+            self._last_speaker_blocks = speaker_blocks  # for fallbacks
+
+            full_text = "\n".join(speaker_blocks.values())
+
+            logger.info("Generating global summary...")
+            global_notes = self.global_summary(full_text)
+
+            logger.info("Generating speaker summaries...")
+            speaker_notes = {}
+            for spk, text in speaker_blocks.items():
+                speaker_notes[spk] = self.summarize_speaker_block(spk, text)
+                time.sleep(0.25)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            json_path = Path(self.results_dir) / f"{request_id}_{ts}.json"
+            txt_path = Path(self.results_dir) / f"{request_id}_{ts}.txt"
+
+            # Save JSON
             with open(json_path, "w", encoding="utf-8") as jf:
-                json.dump({
-                    "global_notes": global_notes,
-                    "speaker_notes": speaker_notes
-                }, jf, indent=2, ensure_ascii=False)
+                json.dump(
+                    {"global_notes": global_notes, "speaker_notes": speaker_notes},
+                    jf,
+                    indent=2,
+                    ensure_ascii=False,
+                )
 
-            txt_path = os.path.join(self.results_dir, f"summary_{request_id}_{timestamp}.txt")
+            # Save TXT
             with open(txt_path, "w", encoding="utf-8") as tf:
-                tf.write("Global Notes:\n")
-                tf.write(global_notes + "\n\nSpeaker Notes:\n")
+                tf.write("GLOBAL SUMMARY\n")
+                tf.write(global_notes + "\n\n")
+                tf.write("SPEAKER NOTES\n")
                 for spk, notes in speaker_notes.items():
-                    tf.write(f"{spk}:\n{notes}\n\n")
+                    tf.write(f"\n[{spk.upper()}]\n{notes}\n")
 
-            logger.info(f"Summarization results saved: {json_path} and {txt_path}")
             return {
                 "request_id": request_id,
                 "global_notes": global_notes,
                 "speaker_notes": speaker_notes,
-                "saved_paths": {"json": json_path, "txt": txt_path}
+                "paths": {"json": str(json_path), "txt": str(txt_path)},
             }
 
         except Exception as e:
-            logger.error(f"Summarization node failed: {e}")
-            return {"error": str(e), "request_id": request_id}
+            logger.error(f"Summarization failed: {e}")
+            return {"error": str(e)}

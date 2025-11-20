@@ -4,6 +4,8 @@ __pycache__/
 .vscode/
 .idea/
 .venv/
+.env
+venv
 
 # Output / temporary files
 test_output/
