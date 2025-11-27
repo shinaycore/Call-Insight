@@ -13,3 +13,11 @@ test_output/
 *.mp3
 *.log
 *.txt
+
+# generated outputs
+preprocessed_results/
+summarization_results/
+sentiment_results/
+topic_results/
+merged_results/
+cache_topics/

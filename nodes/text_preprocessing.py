@@ -176,7 +176,6 @@ class TextPreprocessor:
         # preview
         for speaker, text in speaker_texts.items():
             preview = text[:200] + "..." if len(text) > 200 else text
-            logger.info(f"[{speaker}] {preview}")
 
         return {
             "speaker_texts": speaker_texts,
