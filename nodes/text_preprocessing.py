@@ -38,53 +38,28 @@ class TextPreprocessor:
     # Cleaning Stage
     # ------------------------
     def clean_text(self, text: str, preserve_case: bool = True) -> str:
-        """
-        Clean text while preserving readability
-
-        Args:
-            text: Input text
-            preserve_case: If True, keeps original casing for better readability
-        """
-        # Remove excessive filler words (uh, umm, etc.) but keep natural speech
         text = re.sub(r"\b(uh+|umm+|mm+|ah+|oh+)\b", "", text, flags=re.IGNORECASE)
-
-        # Remove excessive repetitions of punctuation
         text = re.sub(r"([.!?,;:]){2,}", r"\1", text)
-
-        # Clean up extra whitespace
         text = re.sub(r"\s+", " ", text).strip()
-
         return text
 
     # ------------------------
     # Smart Filler Removal
     # ------------------------
     def remove_fillers(self, text: str, aggressive: bool = False) -> str:
-        """
-        Remove filler words intelligently without destroying readability
-
-        Args:
-            text: Input text
-            aggressive: If True, removes more aggressively (may harm readability)
-        """
         if not aggressive:
-            # Light cleaning - only remove obvious fillers
             filler_patterns = [
                 r"\b(like|you know|i mean|sort of|kind of|basically)\b",
-                r"\b(actually|literally)\b(?=.*\b(actually|literally)\b)",  # Only if repeated
+                r"\b(actually|literally)\b(?=.*\b(actually|literally)\b)",
             ]
-
             for pattern in filler_patterns:
                 text = re.sub(pattern, "", text, flags=re.IGNORECASE)
         else:
-            # Aggressive cleaning using spaCy
             doc = self.nlp(text)
             words = [t.text for t in doc if not t.is_punct]
-
             counter = Counter(words)
             total = len(words)
 
-            # Find words that appear too frequently
             dynamic_fillers = {
                 w
                 for w, c in counter.items()
@@ -98,26 +73,17 @@ class TextPreprocessor:
                 for t in doc
                 if t.pos_ != "INTJ" and t.text.lower() not in dynamic_fillers
             ]
-
             text = " ".join(tokens)
 
-        # Clean up spacing
         text = re.sub(r"\s+", " ", text).strip()
         return text
 
     # ------------------------
-    # PII Redaction (Improved)
+    # PII Redaction
     # ------------------------
     def redact_pii_text(
         self, text: str, use_generic_labels: bool = True
     ) -> Dict[str, Any]:
-        """
-        Redact PII with readable replacements
-
-        Args:
-            text: Input text
-            use_generic_labels: If True, uses readable labels instead of brackets
-        """
         if not self.redact_pii or not text.strip():
             return {"text": text, "entities": []}
 
@@ -125,14 +91,12 @@ class TextPreprocessor:
             results = self.analyzer.analyze(text=text, language="en")
 
             if not use_generic_labels:
-                # Use Presidio's default anonymization
                 anonymized = self.anonymizer.anonymize(
                     text=text, analyzer_results=results
                 )
                 entities = [{"type": r.entity_type, "score": r.score} for r in results]
                 return {"text": anonymized.text, "entities": entities}
 
-            # Custom anonymization with readable replacements
             entity_map = {
                 "PERSON": "[NAME]",
                 "EMAIL_ADDRESS": "[EMAIL]",
@@ -148,7 +112,6 @@ class TextPreprocessor:
                 "US_SSN": "[SSN]",
             }
 
-            # Sort by start position (reverse) to replace from end to start
             sorted_results = sorted(results, key=lambda x: x.start, reverse=True)
 
             entities = []
@@ -178,34 +141,51 @@ class TextPreprocessor:
             return {"text": text, "entities": []}
 
     # ------------------------
+    # NEW: Smart Text Chunking
+    # ------------------------
+    def chunk_into_sentences(self, text: str, max_chars: int = 150) -> List[str]:
+        """Break text into natural sentence chunks for better readability."""
+        # Split on sentence boundaries
+        sentences = re.split(r"([.!?]+\s+)", text)
+
+        chunks = []
+        current_chunk = ""
+
+        for i in range(0, len(sentences), 2):
+            sentence = sentences[i]
+            delimiter = sentences[i + 1] if i + 1 < len(sentences) else ""
+
+            # Combine short fragments
+            if len(current_chunk) + len(sentence) + len(delimiter) <= max_chars:
+                current_chunk += sentence + delimiter
+            else:
+                if current_chunk.strip():
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + delimiter
+
+        if current_chunk.strip():
+            chunks.append(current_chunk.strip())
+
+        return chunks
+
+    # ------------------------
     # Full Pipeline
     # ------------------------
     def preprocess_transcript(
         self,
         transcript_json: str,
         request_id: str = "request",
-        cleaning_mode: str = "light",  # "light", "moderate", "aggressive"
+        cleaning_mode: str = "light",
     ) -> Dict[str, Any]:
-        """
-        Preprocess transcript with configurable cleaning levels
-
-        Args:
-            transcript_json: Path to transcript JSON
-            request_id: Request ID
-            cleaning_mode:
-                - "light": Minimal cleaning, preserve most text
-                - "moderate": Remove obvious fillers, clean formatting
-                - "aggressive": Heavy cleaning (may reduce readability)
-        """
         logger.info(f"Processing transcript: {request_id} (mode: {cleaning_mode})")
 
         transcript = load_json(transcript_json)
-
         if isinstance(transcript, dict):
             transcript = transcript.get("results", [])
 
         speaker_texts = {}
         speaker_texts_cleaned = {}
+        speaker_sentences = {}  # NEW: Store sentences separately
         pii_summary = {}
 
         for entry in transcript:
@@ -215,53 +195,58 @@ class TextPreprocessor:
             if len(raw.strip()) < 2:
                 continue
 
-            # Extract timestamp if present in format [MM:SS - MM:SS] Speaker: text
             timestamp = ""
             text_content = raw
 
-            timestamp_match = re.match(
+            ts_match = re.match(
                 r"\[(\d{2}:\d{2} - \d{2}:\d{2})\]\s*Speaker \d+:\s*(.*)", raw
             )
-            if timestamp_match:
-                timestamp = timestamp_match.group(1)
-                text_content = timestamp_match.group(2)
+            if ts_match:
+                timestamp = ts_match.group(1)
+                text_content = ts_match.group(2)
 
-            # Apply cleaning based on mode
             if cleaning_mode == "light":
                 cleaned = self.clean_text(text_content, preserve_case=True)
             elif cleaning_mode == "moderate":
-                cleaned = self.clean_text(text_content, preserve_case=True)
+                cleaned = self.clean_text(text_content)
                 cleaned = self.remove_fillers(cleaned, aggressive=False)
-            else:  # aggressive
+            else:
                 cleaned = self.clean_text(text_content, preserve_case=False)
                 cleaned = self.remove_fillers(cleaned, aggressive=True)
 
-            # Redact PII
-            redacted = self.redact_pii_text(cleaned, use_generic_labels=True)
+            redacted = self.redact_pii_text(cleaned)
 
             if redacted["entities"]:
                 pii_summary.setdefault(speaker, []).extend(redacted["entities"])
 
-            # Store with timestamp for reference
-            formatted_text = (
+            formatted = (
                 f"[{timestamp}] {redacted['text']}" if timestamp else redacted["text"]
             )
 
-            speaker_texts.setdefault(speaker, []).append(formatted_text.strip())
+            speaker_texts.setdefault(speaker, []).append(formatted.strip())
             speaker_texts_cleaned.setdefault(speaker, []).append(
                 redacted["text"].strip()
             )
 
-        # Merge per speaker - use cleaned version without timestamps for better summarization
-        speaker_texts_for_summary = {
-            spk: " ".join(texts) for spk, texts in speaker_texts_cleaned.items()
-        }
+        # ------------------------
+        # NEW: Create sentence-based structure
+        # ------------------------
+        speaker_texts_for_summary = {}
+        for spk, texts in speaker_texts_cleaned.items():
+            # Join all fragments first
+            full_text = " ".join(texts)
+
+            # Break into readable sentences
+            sentences = self.chunk_into_sentences(full_text, max_chars=150)
+            speaker_sentences[spk] = sentences
+
+            # Store as joined text for backward compatibility
+            speaker_texts_for_summary[spk] = " ".join(sentences)
 
         speaker_texts_with_timestamps = {
             spk: "\n".join(texts) for spk, texts in speaker_texts.items()
         }
 
-        # PII stats
         pii_stats = {
             spk: dict(Counter(ent["type"] for ent in ents))
             for spk, ents in pii_summary.items()
@@ -270,48 +255,86 @@ class TextPreprocessor:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         # ------------------------
-        # Save JSON + TXT
+        # Save JSON
         # ------------------------
-
-        # 1. Save JSON (for downstream processing)
         json_path = self.results_dir / f"{request_id}_{ts}.json"
         output = {
             "request_id": request_id,
-            "speaker_texts": speaker_texts_for_summary,  # Clean version
+            "speaker_texts": speaker_texts_for_summary,
             "pii_stats": pii_stats,
         }
-
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=2, ensure_ascii=False)
 
-        # 2. Save TXT for LLM (clean, readable format)
+        # ------------------------
+        # NEW: Improved Clean TXT with line breaks
+        # ------------------------
         txt_path = self.results_dir / f"{request_id}_{ts}.txt"
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write("TRANSCRIPT FOR SUMMARIZATION\n")
             f.write("=" * 50 + "\n\n")
 
-            for spk, text in speaker_texts_for_summary.items():
-                f.write(f"{spk.upper()}:\n{text}\n\n")
+            for spk in sorted(
+                speaker_sentences.keys(),
+                key=lambda s: int(s.split()[-1]) if s.split()[-1].isdigit() else 9999,
+            ):
+                f.write(f"{spk}:\n")
 
-            f.write("\n" + "=" * 50 + "\n")
-            f.write("Note: PII has been redacted for privacy\n")
+                # Write sentences with proper line breaks
+                for sentence in speaker_sentences[spk]:
+                    f.write(f"{sentence}\n")
 
-        # 3. Save detailed version with timestamps (for reference)
+                f.write("\n")  # Extra line between speakers
+
+            f.write("=" * 50 + "\nNote: PII redacted\n")
+
+        # ------------------------
+        # Detailed TXT
+        # ------------------------
         detailed_path = self.results_dir / f"{request_id}_{ts}_detailed.txt"
         with open(detailed_path, "w", encoding="utf-8") as f:
-            f.write("DETAILED TRANSCRIPT WITH TIMESTAMPS\n")
+            f.write("DETAILED TRANSCRIPT (WITH TIMESTAMPS)\n")
             f.write("=" * 50 + "\n\n")
 
             for spk, text in speaker_texts_with_timestamps.items():
                 f.write(f"{spk.upper()}:\n{text}\n\n")
 
-            f.write("\n" + "=" * 50 + "\n")
-            f.write("PII REDACTION SUMMARY:\n")
+            f.write("\nPII SUMMARY:\n")
             f.write(json.dumps(pii_stats, indent=2))
 
+        # ------------------------
+        # Merged TXT with paragraphs
+        # ------------------------
+        merged_path = self.results_dir / f"{request_id}_{ts}_merged.txt"
+        with open(merged_path, "w", encoding="utf-8") as f:
+            f.write("MERGED TRANSCRIPT (ALL SPEAKERS)\n")
+            f.write("=" * 60 + "\n\n")
+
+            def speaker_sort_key(s):
+                try:
+                    return int(s.split()[-1])
+                except:
+                    return 9999
+
+            for spk in sorted(speaker_sentences.keys(), key=speaker_sort_key):
+                f.write(f"=== {spk.upper()} ===\n\n")
+
+                # Write in paragraph form with line breaks every ~3 sentences
+                sentences = speaker_sentences[spk]
+                for i, sentence in enumerate(sentences):
+                    f.write(sentence + " ")
+                    # Add paragraph break every 3 sentences
+                    if (i + 1) % 3 == 0:
+                        f.write("\n\n")
+
+                f.write("\n\n")
+
+            f.write("=" * 60 + "\nEnd of merged transcript\n")
+
         logger.info(f"Saved JSON to: {json_path}")
-        logger.info(f"Saved TXT (for LLM) to: {txt_path}")
+        logger.info(f"Saved TXT to: {txt_path}")
         logger.info(f"Saved detailed TXT to: {detailed_path}")
+        logger.info(f"Saved merged TXT to: {merged_path}")
 
         return {
             "speaker_texts": speaker_texts_for_summary,
@@ -319,4 +342,5 @@ class TextPreprocessor:
             "saved_json_path": str(json_path),
             "saved_txt_path": str(txt_path),
             "saved_detailed_path": str(detailed_path),
+            "saved_merged_path": str(merged_path),
         }

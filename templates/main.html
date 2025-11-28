@@ -1,0 +1,268 @@
+<!doctype html>
+<html>
+    <head>
+        <meta charset="UTF-8" />
+        <title>{{ request_id }} | Call Insight Report</title>
+        <style>
+            body {
+                font-family: "DejaVu Sans", sans-serif;
+                margin: 0;
+                padding: 0;
+                background: #f1f3f6;
+                color: #222;
+            }
+            header {
+                background: linear-gradient(135deg, #3a7bd5, #00d2ff);
+                color: white;
+                padding: 40px;
+            }
+            .container {
+                padding: 40px;
+            }
+            h1,
+            h2,
+            h3 {
+                margin: 0 0 15px 0;
+            }
+            .section {
+                margin-bottom: 35px;
+                padding: 25px;
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 2px 6px #00000015;
+            }
+            .topic {
+                display: inline-block;
+                background: #3a7bd5;
+                color: white;
+                padding: 6px 12px;
+                margin: 4px;
+                border-radius: 20px;
+                font-size: 13px;
+            }
+            .speaker-card {
+                margin-top: 20px;
+                padding: 20px;
+                border-radius: 10px;
+                background: #fafafa;
+                border-left: 6px solid #3a7bd5;
+            }
+            .sent {
+                font-weight: bold;
+            }
+            .sent.POSITIVE {
+                color: #00a836;
+            }
+            .sent.NEGATIVE {
+                color: #c62828;
+            }
+            .sent.NEUTRAL {
+                color: #444;
+            }
+            pre {
+                background: #fff;
+                padding: 16px;
+                border-radius: 8px;
+                white-space: pre-wrap;
+                word-wrap: break-word;
+            }
+            .no-data {
+                color: #888;
+                font-style: italic;
+                text-align: center;
+                padding: 20px;
+            }
+
+            /* Key Moments Styling */
+            .moment-item {
+                display: flex;
+                align-items: flex-start;
+                gap: 15px;
+                margin-bottom: 18px;
+                padding: 15px;
+                background: #fafafa;
+                border-radius: 8px;
+                border-left: 4px solid #3a7bd5;
+            }
+            .time-badge {
+                background: #3a7bd5;
+                color: white;
+                padding: 6px 12px;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 14px;
+                min-width: 55px;
+                text-align: center;
+                flex-shrink: 0;
+            }
+            .moment-content {
+                flex: 1;
+            }
+            .moment-speaker {
+                font-weight: bold;
+                color: #3a7bd5;
+                margin-bottom: 5px;
+            }
+            .moment-description {
+                color: #444;
+                line-height: 1.6;
+            }
+            .importance-badge {
+                display: inline-block;
+                padding: 3px 8px;
+                border-radius: 4px;
+                font-size: 11px;
+                margin-left: 8px;
+                text-transform: uppercase;
+            }
+            .importance-high {
+                background: #ff4444;
+                color: white;
+            }
+            .importance-medium {
+                background: #ffaa00;
+                color: white;
+            }
+            .importance-low {
+                background: #44aa44;
+                color: white;
+            }
+        </style>
+    </head>
+    <body>
+        <header>
+            <h1>📞 Call Insight Report</h1>
+            <p>Request: {{ request_id }} · {{ generated_at }}</p>
+        </header>
+        <div class="container">
+            <!-- Global Summary Section -->
+            <div class="section">
+                <h2>📝 Global Summary</h2>
+                {% if summary %} {% if summary is mapping %} {% if
+                summary.global_notes %}
+                <p>{{ summary.global_notes }}</p>
+                {% elif summary.summary %}
+                <p>{{ summary.summary }}</p>
+                {% else %}
+                <p>{{ summary }}</p>
+                {% endif %} {% else %}
+                <p>{{ summary }}</p>
+                {% endif %} {% else %}
+                <p class="no-data">No summary available.</p>
+                {% endif %}
+            </div>
+
+            <!-- Key Moments Section -->
+            <div class="section">
+                <h2>🔑 Key Moments</h2>
+                {% if key_moments and key_moments|length > 0 %} {% set
+                has_valid_moment = false %} {% for moment in key_moments %} {%
+                if moment.description and moment.description|trim %} {% set
+                has_valid_moment = true %}
+                <div class="moment-item">
+                    <div class="time-badge">
+                        {{ moment.formatted_time if moment.formatted_time else
+                        '00:00' }}
+                    </div>
+                    <div class="moment-content">
+                        <div class="moment-speaker">
+                            {{ moment.speaker|title if moment.speaker else
+                            'Unknown Speaker' }} {% if moment.importance %}
+                            <span
+                                class="importance-badge importance-{{ moment.importance }}"
+                                >{{ moment.importance }}</span
+                            >
+                            {% endif %}
+                        </div>
+                        <div class="moment-description">
+                            {{ moment.description }}
+                        </div>
+                    </div>
+                </div>
+                {% endif %} {% endfor %} {% if not has_valid_moment %}
+                <p class="no-data">
+                    Key moments detected but descriptions are not available.
+                </p>
+                {% endif %} {% else %}
+                <p class="no-data">
+                    No key moments identified in this conversation.
+                </p>
+                {% endif %}
+            </div>
+
+            <!-- Topics Section -->
+            <div class="section">
+                <h2>🏷️ Topics</h2>
+                {% if topics %} {% if topics is mapping %} {% if topics.topics
+                and topics.topics|length > 0 %} {% for topic in topics.topics %}
+                <span class="topic">{{ topic }}</span>
+                {% endfor %} {% else %}
+                <p class="no-data">No topics extracted.</p>
+                {% endif %} {% elif topics is iterable and topics is not string
+                %} {% for topic in topics %}
+                <span class="topic">{{ topic }}</span>
+                {% endfor %} {% else %}
+                <p class="no-data">No topics extracted.</p>
+                {% endif %} {% else %}
+                <p class="no-data">No topics extracted.</p>
+                {% endif %}
+            </div>
+
+            <!-- Speakers Section -->
+            <div class="section">
+                <h2>👥 Speakers</h2>
+                {% if summary and summary is mapping and summary.speaker_notes
+                %} {% for speaker, notes in summary.speaker_notes.items() %}
+                <div class="speaker-card">
+                    <h3>{{ speaker|title }}</h3>
+
+                    {% if sentiment and sentiment.aggregated and speaker in
+                    sentiment.aggregated %} {% set agg =
+                    sentiment.aggregated[speaker] %}
+                    <p>
+                        Sentiment:
+                        <span class="sent {{ agg.overall_sentiment }}"
+                            >{{ agg.overall_sentiment }}</span
+                        >
+                        (Positive: {{ agg.POSITIVE }}, Negative: {{ agg.NEGATIVE
+                        }}, Neutral: {{ agg.NEUTRAL }})
+                    </p>
+                    {% endif %} {% if notes and notes|trim %}
+                    <pre>{{ notes }}</pre>
+                    {% else %}
+                    <p class="no-data">
+                        No summary available for this speaker.
+                    </p>
+                    {% endif %}
+                </div>
+                {% endfor %} {% elif sentiment and sentiment.results %} {% for
+                speaker_data in sentiment.results %}
+                <div class="speaker-card">
+                    <h3>{{ speaker_data.speaker|title }}</h3>
+
+                    {% if sentiment.aggregated and speaker_data.speaker in
+                    sentiment.aggregated %} {% set agg =
+                    sentiment.aggregated[speaker_data.speaker] %}
+                    <p>
+                        Sentiment:
+                        <span class="sent {{ agg.overall_sentiment }}"
+                            >{{ agg.overall_sentiment }}</span
+                        >
+                        (Positive: {{ agg.POSITIVE }}, Negative: {{ agg.NEGATIVE
+                        }}, Neutral: {{ agg.NEUTRAL }})
+                    </p>
+                    {% endif %} {% if speaker_data.summary %}
+                    <pre>{{ speaker_data.summary }}</pre>
+                    {% else %}
+                    <p class="no-data">
+                        No summary available for this speaker.
+                    </p>
+                    {% endif %}
+                </div>
+                {% endfor %} {% else %}
+                <p class="no-data">No speaker data available.</p>
+                {% endif %}
+            </div>
+        </div>
+    </body>
+</html>

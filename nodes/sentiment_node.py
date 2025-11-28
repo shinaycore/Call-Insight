@@ -1,6 +1,5 @@
 import json
 import os
-from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -11,6 +10,18 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+MAX_CHARS = 400  # safe for RoBERTa-based emotion models
+
+
+def chunk_text(text: str, chunk_size: int = MAX_CHARS):
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= chunk_size:
+        return [text]
+    return [text[i : i + chunk_size].strip() for i in range(0, len(text), chunk_size)]
+
+
 class SentimentNode:
     def __init__(self, config_path: str = "config/sentiment_config.json"):
         if not os.path.exists(config_path):
@@ -18,20 +29,20 @@ class SentimentNode:
 
         self.config = load_json(config_path)
 
-        self.task_type = self.config.get("task_type", "sentiment")
+        self.task_type = self.config.get("task_type", "emotion")
         self.model_path = self.config.get(
             "model_path",
-            self.config.get("model", "distilbert-base-uncased-finetuned-sst-2-english"),
+            "j-hartmann/emotion-english-distilroberta-base",
         )
 
         logger.info(f"Loading model '{self.model_path}' for task '{self.task_type}'...")
 
         self.analyzer = pipeline(
-            "sentiment-analysis"
-            if self.task_type == "sentiment"
-            else "text-classification",
+            "text-classification",
             model=self.model_path,
             tokenizer=self.model_path,
+            top_k=None,  # full emotion distribution
+            truncation=True,
         )
 
         logger.info("Model loaded successfully.")
@@ -39,169 +50,169 @@ class SentimentNode:
         self.results_dir = self.config.get("results_dir", "sentiment_results")
         os.makedirs(self.results_dir, exist_ok=True)
 
-    def _normalize(self, result: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize HF model output to a consistent structure."""
-        label = result.get("label", "").upper()
+    # --------------------------------------------------------------
+    # SAFE NORMALIZER
+    # --------------------------------------------------------------
+    def _normalize(self, raw):
+        # raw is a list of dicts: [{label, score}, {...}]
+        if not isinstance(raw, list) or len(raw) == 0:
+            return {"label": "NEUTRAL", "sentiment": "NEUTRAL", "score": 0.0}
 
-        if self.task_type == "emotion":
-            if label in ["JOY"]:
-                sentiment = "POSITIVE"
-            elif label in ["SURPRISE", "NEUTRAL"]:
-                sentiment = "NEUTRAL"
-            else:
-                sentiment = "NEGATIVE"
+        best = max(raw, key=lambda x: x.get("score", 0.0))
+
+        label = best.get("label", "neutral").upper()
+        score = float(best.get("score", 0.0))
+
+        pos = {"JOY", "LOVE", "HAPPINESS", "POSITIVE"}
+        neg = {"ANGER", "FEAR", "DISGUST", "SADNESS", "NEGATIVE"}
+
+        if label in pos:
+            sentiment = "POSITIVE"
+        elif label in neg:
+            sentiment = "NEGATIVE"
         else:
-            sentiment = label
+            sentiment = "NEUTRAL"
 
-        return {
-            "label": label,
-            "sentiment": sentiment,
-            "score": result.get("score", 0.0),
-        }
+        return {"label": label, "sentiment": sentiment, "score": score}
 
-    def analyze_speakers_batched(
-        self, transcript: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """Batch sentiment analysis while skipping empty text chunks safely."""
+    # --------------------------------------------------------------
+    # ANALYSIS WITH CHUNKING + UNWRAPPING
+    # --------------------------------------------------------------
+    def _unwrap(self, out):
+        """
+        HF pipelines sometimes return:
+        [[[{...}]]], [[[{...}]]], [{...}], etc.
+        This safely unwraps nested lists until only the final list remains.
+        """
+        while isinstance(out, list) and len(out) == 1:
+            out = out[0]
+        return out
 
-        valid_entries = []
-        texts = []
-
-        # Collect only non-empty texts
-        for entry in transcript:
-            txt = entry.get("text", "")
-            if txt and txt.strip():
-                valid_entries.append(entry)
-                texts.append(txt)
-            else:
-                entry["analysis"] = []
-
-        # Run model only on valid entries
-        if texts:
-            raw_results = self.analyzer(texts)
-        else:
-            raw_results = []
-
-        # Map results back
+    def analyze_speakers_chunked(self, transcript: List[Dict[str, Any]]) -> List[Dict]:
         analyzed = []
-        idx = 0
 
         for entry in transcript:
-            txt = entry.get("text", "")
+            speaker = entry.get("speaker", "unknown")
+            text = entry.get("text", "").strip()
 
-            if txt and txt.strip():
-                result = raw_results[idx]
-                idx += 1
+            if not text:
+                analyzed.append({"speaker": speaker, "text": "", "analysis": []})
+                continue
 
-                if isinstance(result, list):
-                    normalized = [self._normalize(r) for r in result]
-                else:
-                    normalized = [self._normalize(result)]
+            chunks = chunk_text(text)
+            results = []
 
-                analyzed.append(
-                    {
-                        "speaker": entry.get("speaker", "unknown"),
-                        "text": txt,
-                        "analysis": normalized,
-                    }
-                )
-            else:
-                analyzed.append(
-                    {
-                        "speaker": entry.get("speaker", "unknown"),
-                        "text": txt,
-                        "analysis": [],
-                    }
-                )
+            for ch in chunks:
+                try:
+                    raw = self.analyzer(ch)
+                    raw = self._unwrap(raw)
+                    normalized = self._normalize(raw)
+                    results.append(normalized)
+
+                except Exception as e:
+                    logger.error(f"Chunk sentiment failed: {e}")
+                    results.append(
+                        {"label": "NEUTRAL", "sentiment": "NEUTRAL", "score": 0.0}
+                    )
+
+            analyzed.append({"speaker": speaker, "text": text, "analysis": results})
 
         return analyzed
 
-    def save_sentiment_results(
-        self, results: List[Dict[str, Any]], request_id: Optional[str] = None
-    ) -> Dict[str, str]:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        base_name = (
-            f"sentiment_{request_id}_{timestamp}"
-            if request_id
-            else f"sentiment_{timestamp}"
-        )
-        json_path = os.path.join(self.results_dir, f"{base_name}.json")
-
-        out = {
-            "model_used": self.model_path,
-            "task_type": self.task_type,
-            "results": results,
-        }
-
-        with open(json_path, "w", encoding="utf-8") as jf:
-            json.dump(out, jf, indent=2, ensure_ascii=False)
-
-        logger.info(f"Sentiment results saved: {json_path}")
-        return {"json_path": json_path}
-
-    def aggregate_per_speaker(
-        self, analyzed_results: List[Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        stats = defaultdict(
-            lambda: {
-                "POSITIVE": 0,
-                "NEGATIVE": 0,
-                "NEUTRAL": 0,
-                "score_sum": 0.0,
-                "count": 0,
-            }
-        )
-
-        for item in analyzed_results:
-            speaker = item.get("speaker", "unknown")
-
-            for a in item.get("analysis", []):
-                sent = a.get("sentiment", "NEUTRAL")
-                score = a.get("score", 0.0)
-
-                stats[speaker][sent] += 1
-                stats[speaker]["score_sum"] += score
-                stats[speaker]["count"] += 1
-
+    # --------------------------------------------------------------
+    # AGGREGATION
+    # --------------------------------------------------------------
+    def aggregate_per_speaker(self, analyzed: List[Dict]) -> Dict:
         final = {}
-        for speaker, s in stats.items():
-            avg = s["score_sum"] / s["count"] if s["count"] else 0.0
 
-            final[speaker] = {
-                "counts": {
-                    "POSITIVE": s["POSITIVE"],
-                    "NEGATIVE": s["NEGATIVE"],
-                    "NEUTRAL": s["NEUTRAL"],
-                },
-                "average_score": avg,
-                "total_chunks": s["count"],
+        for entry in analyzed:
+            spk = entry["speaker"]
+            entries = entry["analysis"]
+
+            if not entries:
+                final[spk] = {
+                    "POSITIVE": 0,
+                    "NEGATIVE": 0,
+                    "NEUTRAL": 0,
+                    "average_score": 0.0,
+                    "total_chunks": 0,
+                    "overall_sentiment": "NEUTRAL",
+                }
+                continue
+
+            pos = sum(1 for x in entries if x["sentiment"] == "POSITIVE")
+            neg = sum(1 for x in entries if x["sentiment"] == "NEGATIVE")
+            neu = sum(1 for x in entries if x["sentiment"] == "NEUTRAL")
+
+            avg_score = sum(x["score"] for x in entries) / len(entries)
+
+            counts = {"POSITIVE": pos, "NEGATIVE": neg, "NEUTRAL": neu}
+            top = max(counts, key=counts.get)
+
+            final[spk] = {
+                "POSITIVE": pos,
+                "NEGATIVE": neg,
+                "NEUTRAL": neu,
+                "average_score": avg_score,
+                "total_chunks": len(entries),
+                "overall_sentiment": top,
             }
 
         return final
 
+    # --------------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------------
+    def save_sentiment_results(self, results, request_id=None):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = f"sentiment_{request_id}_{ts}" if request_id else f"sentiment_{ts}"
+        path = os.path.join(self.results_dir, f"{name}.json")
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"model": self.model_path, "task": self.task_type, "results": results},
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+
+        logger.info(f"Sentiment results saved: {path}")
+        return path
+
+    # --------------------------------------------------------------
+    # LANGGRAPH NODE
+    # --------------------------------------------------------------
     def sentiment_analysis_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         try:
             transcript = state.get("diarized_transcript", [])
-            if not transcript:
-                return {
-                    "error": "No diarized transcript provided",
-                    "request_id": state.get("request_id"),
-                }
+            rid = state.get("request_id")
 
-            analyzed = self.analyze_speakers_batched(transcript)
-            saved = self.save_sentiment_results(
-                analyzed, request_id=state.get("request_id")
-            )
+            if not transcript:
+                return {"error": "No transcript", "saved_path": None}
+
+            analyzed = self.analyze_speakers_chunked(transcript)
             aggregated = self.aggregate_per_speaker(analyzed)
 
+            summary = {
+                spk: {
+                    "overall_sentiment": aggregated[spk]["overall_sentiment"],
+                    "avg_score": aggregated[spk]["average_score"],
+                    "chunks": aggregated[spk]["total_chunks"],
+                }
+                for spk in aggregated
+            }
+
+            saved_path = self.save_sentiment_results(analyzed, rid)
+
             return {
-                "request_id": state.get("request_id"),
+                "request_id": rid,
                 "results": analyzed,
                 "aggregated": aggregated,
-                "saved_path": saved.get("json_path"),
+                "summary": summary,
+                "saved_path": saved_path,
+                "error": None,
             }
 
         except Exception as e:
-            logger.error(f"Sentiment node failed: {e}")
-            return {"error": str(e), "request_id": state.get("request_id")}
+            logger.error(f"Sentiment failed: {e}")
+            return {"error": str(e), "saved_path": None}

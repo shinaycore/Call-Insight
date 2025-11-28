@@ -31,24 +31,56 @@ class SummarizationNode:
 
     def _parse_txt(self, txt_file: str) -> Dict[str, str]:
         """Parse preprocessed TXT into speaker blocks."""
-        speakers, current, buffer = {}, None, []
+        speakers = {}
+        current = None
+        buffer = []
+        started = False  # Flag to track if we've started parsing content
 
         with open(txt_file, "r", encoding="utf-8") as f:
             for line in f:
+                original_line = line
                 line = line.strip()
 
-                if line.endswith(":") and line[:-1].isalpha():
+                # Skip header lines until we find actual content
+                if not started:
+                    if line.startswith(
+                        "TRANSCRIPT FOR SUMMARIZATION"
+                    ) or line.startswith("="):
+                        continue
+                    started = True
+
+                # Stop at footer sections
+                if line.startswith("===") and "End of" in line:
+                    break
+                if line.startswith("Note: PII redacted"):
+                    break
+
+                # Match "Speaker X:" format
+                if line.startswith("Speaker") and line.endswith(":"):
+                    # Save previous speaker's content
                     if current and buffer:
                         speakers[current] = "\n".join(buffer)
-                    current = line[:-1].lower()
+                        logger.debug(
+                            f"Saved {current}: {len(buffer)} lines, {len(speakers[current])} chars"
+                        )
+
+                    # Start new speaker
+                    current = line[:-1].lower()  # Remove colon, lowercase
                     buffer = []
-                elif line.startswith("PII SUMMARY"):
-                    break
-                elif current and line:
+                    logger.debug(f"Found speaker: {current}")
+
+                # Add content to current speaker
+                elif current and line and not line.startswith("="):
                     buffer.append(line)
 
+        # Save last speaker
         if current and buffer:
             speakers[current] = "\n".join(buffer)
+            logger.debug(f"Saved final {current}: {len(buffer)} lines")
+
+        logger.info(f"Parse complete. Found speakers: {list(speakers.keys())}")
+        for spk, text in speakers.items():
+            logger.info(f"  {spk}: {len(text)} chars")
 
         return speakers
 
@@ -105,9 +137,6 @@ class SummarizationNode:
 
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"].strip()
-
-                # Debug what we got
-                logger.info(f"API returned {len(content)} chars: {content[:100]}...")
 
                 # If we got actual content, return it
                 if len(content) > 20:
@@ -213,7 +242,14 @@ Summary:"""
             speakers = self._parse_txt(txt_file)
 
             if not speakers:
+                logger.error(f"No speakers found. Parsed speakers dict: {speakers}")
+                # Try to read file and show first few lines for debugging
+                with open(txt_file, "r") as f:
+                    first_lines = [f.readline() for _ in range(10)]
+                logger.error(f"First 10 lines of file:\n{''.join(first_lines)}")
                 raise ValueError("No speakers found in file")
+
+            logger.info(f"Found {len(speakers)} speakers: {list(speakers.keys())}")
 
             # Generate summaries
             logger.info("Generating global summary...")

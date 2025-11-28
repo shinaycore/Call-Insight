@@ -1,5 +1,6 @@
 """
 LangGraph pipeline runner for Call-Insight (LangGraph 1.x compatible)
+WITH KEY MOMENTS NODE
 """
 
 import json
@@ -19,6 +20,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from langgraph.graph import StateGraph
 from nodes.audio_preprocessing import AudioPreprocessingNode
 from nodes.diarization_node import DiarizationNode
+from nodes.key_moments_node import KeyMomentsNode  # NEW IMPORT
 from nodes.merge_nodes import MergeNode
 from nodes.sentiment_node import SentimentNode
 from nodes.summariser_node import SummarizationNode
@@ -285,6 +287,19 @@ def topics_node(state: Dict[str, Any]):
     return state
 
 
+# NEW NODE
+def key_moments_node(state: Dict[str, Any]):
+    logger.info("Running Key Moments Extraction...")
+
+    km_node = KeyMomentsNode(results_dir="key_moments_results")
+    out = km_node(state)
+
+    state.update(out)
+    logger.info(f"Key moments saved: {out.get('key_moments_path')}")
+    logger.info(f"Found {out['key_moments']['summary']['total_moments']} moments")
+    return state
+
+
 def merge_node(state: Dict[str, Any]):
     logger.info("Running MergeNode...")
 
@@ -293,6 +308,8 @@ def merge_node(state: Dict[str, Any]):
     out = merger.merge(
         summary_path=state["summary"]["paths"]["json"],
         sentiment_path=state["sentiment"]["saved_path"],
+        topic_path=state["topics"]["topic_path"],
+        key_moments_path=state["key_moments_path"],  # NEW PARAMETER
         request_id=state["request_id"],
     )
 
@@ -314,6 +331,7 @@ def build_graph():
     graph.add_node("summarize", summarizer_node)
     graph.add_node("sentiment", sentiment_node)
     graph.add_node("topics", topics_node)
+    graph.add_node("key_moments", key_moments_node)  # NEW NODE
     graph.add_node("merge", merge_node)
 
     # Define edges (pipeline flow)
@@ -322,7 +340,8 @@ def build_graph():
     graph.add_edge("preprocess", "summarize")
     graph.add_edge("summarize", "sentiment")
     graph.add_edge("sentiment", "topics")
-    graph.add_edge("topics", "merge")
+    graph.add_edge("topics", "key_moments")  # NEW EDGE
+    graph.add_edge("key_moments", "merge")  # UPDATED EDGE
 
     # Set entry and finish points
     graph.set_entry_point("audio_preprocessing")
@@ -393,6 +412,9 @@ def run_pipeline(
         f"Transcript duration: {final_state.get('diarization_results', {}).get('duration'):.2f}s"
     )
     logger.info(f"Topics: {final_state.get('topics', {}).get('topics')}")
+    logger.info(
+        f"Key Moments: {final_state.get('key_moments', {}).get('summary', {}).get('total_moments')} found"
+    )
     logger.info(f"Merged file: {final_state.get('merged', {}).get('merged_path')}")
     logger.info("=" * 60)
 

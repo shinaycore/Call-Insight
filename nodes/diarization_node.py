@@ -270,13 +270,11 @@ if __name__ == "__main__":
     state = {"audio_file_path": "path/to/meeting.mp3"}
     result = diarizer(state)
 
-    if not result.get("error"):
-        print(f"\nDuration: {result['duration']:.2f}s")
-        print(f"Speakers: {result['speakers_count']}")
-        print("\nFormatted Transcript:")
-        print(format_transcript(result["speaker_segments"]))
-    else:
-        print(f"Error: {result['error']}")
+    # if not result.get("error"):
+    #     print(f"\nDuration: {result['duration']:.2f}s")
+    #     print(f"Speakers: {result['speakers_count']}")
+    # else:
+    #     print(f"Error: {result['error']}")
 
     # Example: Use in LangGraph
     # from langgraph.graph import StateGraph

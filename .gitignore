@@ -13,6 +13,7 @@ test_output/
 *.mp3
 *.log
 *.txt
+*.webm
 
 # generated outputs
 preprocessed_results/
@@ -21,3 +22,4 @@ sentiment_results/
 topic_results/
 merged_results/
 cache_topics/
+reports/
