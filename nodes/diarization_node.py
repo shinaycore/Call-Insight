@@ -1,86 +1,289 @@
+"""
+Deepgram Diarization Node for LangGraph
+Standalone node that processes local audio files and returns diarized transcription
+Uses direct HTTP API to avoid SDK version issues
+"""
+
 import os
-import uuid
-from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
-from pydub import AudioSegment
+import requests
 from utils.logger import get_logger
-
-import torch
-from pyannote.audio import Pipeline
 
 logger = get_logger(__name__)
 
 
-# class DiarizationNode:
-    def __init__(self, base_folder: str = "diarized_segments"):
-        # unique folder per run
-        run_id = f"{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
-        self.out_folder = os.path.join(base_folder, run_id)
-        os.makedirs(self.out_folder, exist_ok=True)
+class DiarizationState(TypedDict):
+    """Minimal state schema for diarization node"""
 
-        # force CPU (your i3 laptop has no GPU)
-        self.device = torch.device("cpu")
+    # Inputs
+    audio_file_path: Optional[str]
 
-        # load diarization pipeline
-        # ⚠️ NOTE: pyannote >=2.0 requires HF login. For local/no-HF,
-        # use pyannote.audio==1.1 OR download model weights yourself.
-        try:
-            self.pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization")
-        except Exception as e:
-            logger.error(
-                f"Could not load pyannote pipeline (needs HF models). "
-                f"Error: {e}"
+    # Outputs
+    full_transcript: Optional[str]
+    speaker_segments: Optional[List[Dict[str, Any]]]
+    speakers_count: Optional[int]
+    duration: Optional[float]
+    error: Optional[str]
+
+
+class DiarizationNode:
+    """
+    LangGraph node for audio diarization using Deepgram
+
+    Uses direct HTTP API for maximum compatibility
+    Processes local audio files only
+    """
+
+    def __init__(
+        self, api_key: Optional[str] = None, model: str = "nova-2", language: str = "en"
+    ):
+        """
+        Initialize Deepgram client
+
+        Args:
+            api_key: Deepgram API key (if None, reads from DEEPGRAM_API_KEY env var)
+            model: Deepgram model to use (default: nova-2)
+            language: Language code (default: en)
+        """
+        self.api_key = api_key or os.getenv("DEEPGRAM_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "Deepgram API key not provided. Set DEEPGRAM_API_KEY environment variable "
+                "or pass api_key parameter"
             )
+
+        self.model = model
+        self.language = language
+        self.base_url = "https://api.deepgram.com/v1/listen"
+        logger.info(
+            f"DiarizationNode initialized with model={model}, language={language}"
+        )
+
+    def __call__(self, state: Dict) -> Dict:
+        """
+        LangGraph node function - processes audio and updates state
+
+        Args:
+            state: Current state (must contain 'audio_file_path')
+
+        Returns:
+            Updated state with diarization results
+        """
+        logger.info("Starting diarization process")
+
+        try:
+            # Check if we have audio input
+            audio_file = state.get("audio_file_path")
+
+            if not audio_file:
+                logger.error("No audio source provided in state")
+                return {
+                    **state,
+                    "error": "No audio_file_path provided in state",
+                    "full_transcript": None,
+                    "speaker_segments": None,
+                    "speakers_count": None,
+                    "duration": None,
+                }
+
+            # Process audio file
+            logger.info(f"Processing local file: {audio_file}")
+            result = self._process_file(audio_file)
+
+            if result:
+                logger.info(
+                    f"Diarization complete - Duration: {result['duration']:.2f}s, "
+                    f"Speakers: {result['speakers_count']}, "
+                    f"Segments: {len(result['speaker_segments'])}"
+                )
+
+                # Update state with results
+                return {
+                    **state,
+                    "full_transcript": result["full_transcript"],
+                    "speaker_segments": result["speaker_segments"],
+                    "speakers_count": result["speakers_count"],
+                    "duration": result["duration"],
+                    "error": None,
+                }
+            else:
+                logger.error("Diarization returned no results")
+                return {
+                    **state,
+                    "error": "Diarization processing failed - no results returned",
+                }
+
+        except FileNotFoundError as e:
+            logger.error(f"Audio file not found: {e}")
+            return {**state, "error": f"Audio file not found: {str(e)}"}
+
+        except Exception as e:
+            logger.exception(f"Unexpected error during diarization: {e}")
+            return {**state, "error": f"Diarization error: {str(e)}"}
+
+    def _process_file(self, audio_file_path: str) -> Optional[Dict]:
+        """
+        Process local audio file
+
+        Args:
+            audio_file_path: Path to audio file
+
+        Returns:
+            Parsed diarization results
+        """
+        try:
+            logger.debug(f"Reading audio file: {audio_file_path}")
+            with open(audio_file_path, "rb") as audio:
+                audio_data = audio.read()
+
+            logger.debug(f"Audio file size: {len(audio_data)} bytes")
+
+            # Build query params
+            params = {
+                "model": self.model,
+                "smart_format": "true",
+                "diarize": "true",
+                "punctuate": "true",
+                "utterances": "true",
+                "language": self.language,
+            }
+
+            headers = {
+                "Authorization": f"Token {self.api_key}",
+                "Content-Type": "audio/wav",  # Adjust based on file type
+            }
+
+            logger.debug("Sending request to Deepgram API")
+            response = requests.post(
+                self.base_url,
+                params=params,
+                headers=headers,
+                data=audio_data,
+                timeout=300,  # 5 min timeout
+            )
+
+            response.raise_for_status()
+            return self._parse_response(response.json())
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"HTTP request error: {e}")
+            if hasattr(e.response, "text"):
+                logger.error(f"Response body: {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Error processing file: {e}")
             raise
 
-        logger.info(f"Segments will be saved in: {self.out_folder}")
+    def _parse_response(self, response: Dict) -> Dict:
+        """
+        Parse Deepgram API response
 
-    def _cut_audio(self, audio_file: str, start: float, end: float, out_path: str):
-        audio = AudioSegment.from_file(audio_file)
-        segment = audio[start * 1000 : end * 1000]  # sec → ms
-        segment.export(out_path, format="wav")
-        return out_path
+        Args:
+            response: Deepgram API response dict
 
-    # def diarization_node(
-        self, state: Dict[str, Any], config: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        start_ts = datetime.utcnow()
+        Returns:
+            Dictionary with parsed results
+        """
         try:
-            audio_file = state.get("input_path")
-            if not audio_file or not os.path.exists(audio_file):
-                return {"error": "missing or invalid input_path"}
+            logger.debug("Parsing Deepgram response")
 
-            logger.info(f"Running pyannote diarization on {audio_file}...")
+            # Extract full transcript
+            full_transcript = response["results"]["channels"][0]["alternatives"][0][
+                "transcript"
+            ]
 
-            diarization = self.pipeline({"uri": "sample", "audio": audio_file})
+            # Extract speaker utterances
+            utterances = response["results"]["utterances"]
+            logger.debug(f"Found {len(utterances)} utterances")
 
-            segments = []
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                spk = f"Speaker_{speaker}"
-                chunk_id = str(uuid.uuid4())[:8]
-                out_path = os.path.join(self.out_folder, f"{spk}_{chunk_id}.wav")
-                self._cut_audio(audio_file, turn.start, turn.end, out_path)
+            speaker_segments = []
+            speakers = set()
 
-                segments.append({
-                    "speaker": spk,
-                    "start": round(turn.start, 2),
-                    "end": round(turn.end, 2),
-                    "chunk_path": out_path
-                })
+            for utterance in utterances:
+                segment = {
+                    "speaker": f"Speaker {utterance['speaker']}",
+                    "text": utterance["transcript"],
+                    "start": utterance["start"],
+                    "end": utterance["end"],
+                    "confidence": utterance["confidence"],
+                }
+                speaker_segments.append(segment)
+                speakers.add(utterance["speaker"])
 
-            result = {
-                "segments": segments,
-                "num_segments": len(segments),
-                "processing_duration": (datetime.utcnow() - start_ts).total_seconds(),
-                "request_id": state.get("request_id"),
-            }
-            logger.info(f"Diarization complete: {len(segments)} segments found.")
-            return result
+            # Get audio duration
+            duration = response["metadata"]["duration"]
 
-        except Exception as e:
-            logger.error(f"diarization_node failed: {e}")
+            logger.debug(f"Parsed {len(speakers)} unique speakers")
+
             return {
-                "error": f"{type(e).__name__}: {str(e)}",
-                "request_id": state.get("request_id"),
+                "full_transcript": full_transcript,
+                "speaker_segments": speaker_segments,
+                "speakers_count": len(speakers),
+                "duration": duration,
             }
+
+        except KeyError as e:
+            logger.error(f"Error parsing response - missing key: {e}")
+            logger.error(f"Response structure: {response.keys()}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error parsing response: {e}")
+            raise
+
+
+# Utility function for formatting
+def format_transcript(speaker_segments: List[Dict]) -> str:
+    """
+    Format speaker segments into readable transcript
+
+    Args:
+        speaker_segments: List of speaker segment dicts
+
+    Returns:
+        Formatted transcript string
+    """
+    if not speaker_segments:
+        return ""
+
+    formatted = []
+    for segment in speaker_segments:
+        timestamp = f"[{_format_timestamp(segment['start'])} - {_format_timestamp(segment['end'])}]"
+        formatted.append(f"{timestamp} {segment['speaker']}: {segment['text']}")
+
+    return "\n\n".join(formatted)
+
+
+def _format_timestamp(seconds: float) -> str:
+    """Convert seconds to MM:SS format"""
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes:02d}:{secs:02d}"
+
+
+# Example usage
+if __name__ == "__main__":
+    # Initialize node (API key read from environment)
+    diarizer = DiarizationNode()
+
+    # Process local file
+    state = {"audio_file_path": "path/to/meeting.mp3"}
+    result = diarizer(state)
+
+    if not result.get("error"):
+        print(f"\nDuration: {result['duration']:.2f}s")
+        print(f"Speakers: {result['speakers_count']}")
+        print("\nFormatted Transcript:")
+        print(format_transcript(result["speaker_segments"]))
+    else:
+        print(f"Error: {result['error']}")
+
+    # Example: Use in LangGraph
+    # from langgraph.graph import StateGraph
+    #
+    # workflow = StateGraph(dict)
+    # workflow.add_node("diarization", diarizer)
+    # workflow.set_entry_point("diarization")
+    # # ... add more nodes
+    # app = workflow.compile()
+    # final_state = app.invoke({"audio_file_path": "audio.mp3"})
