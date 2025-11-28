@@ -12,7 +12,7 @@ test_output/
 *.wav
 *.mp3
 *.log
-#*.txt
+*.txt
 *.webm
 
 # generated outputs
