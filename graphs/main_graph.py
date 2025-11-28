@@ -440,9 +440,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # Option 1: Absolute path (recommended)
-    audio_path = (
-        "/home/shinay/Documents/tutorials/pythonProjects/Call-Insight/test_5min.wav"
-    )
+    audio_path = "/home/shinay/Documents/tutorials/pythonProjects/Call-Insight/Product Marketing Meeting (weekly) 2021-06-28.mp3"
 
     # Option 2: Relative path from script location
     # script_dir = os.path.dirname(os.path.abspath(__file__))

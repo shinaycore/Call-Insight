@@ -74,7 +74,7 @@ class KeyMomentsNode:
         return "00:00"
 
     def detect_sentiment_shifts(
-        self, sentiment_data: Dict, segments: List[Dict], threshold: float = 0.3
+        self, sentiment_data: Dict, segments: List[Dict], threshold: float = 0.7
     ) -> List[Dict]:
         """
         Detect significant sentiment changes between consecutive segments
@@ -190,19 +190,71 @@ class KeyMomentsNode:
         Keywords: disagree, but, however, actually, concern, issue, problem, etc.
         """
         disagreement_keywords = [
+            # direct disagreement
             "disagree",
-            "don't think",
-            "not sure",
-            "concern",
+            "i don't agree",
+            "i'm not convinced",
+            "i don't think so",
+            "i don't think",
+            "that's not correct",
+            "not accurate",
+            "not true",
+            "i doubt",
+            "i wouldn't say that",
+            # soft corporate disagreement
+            "i'm not sure",
+            "i'm unsure",
+            "i don't know about that",
+            "not sure that’s right",
+            "i have concerns",
+            "i have a concern",
             "concerned",
-            "issue",
-            "problem",
-            "worried",
+            "this raises a concern",
+            "my worry is",
+            "i'm worried",
+            "i'm hesitant",
+            "hesitation",
+            "i question",
+            "i'm questioning",
+            "uncertain",
+            # challenge language
+            "the issue is",
+            "the problem is",
+            "there's a problem",
+            "this is problematic",
+            "i see a problem",
+            "this won't work",
+            "that won't work",
+            "won't be effective",
+            "this doesn't make sense",
+            "i don't see how",
+            "i fail to see",
+            # adversative transitions (subtle disagreement)
             "however",
             "but actually",
+            "but the thing is",
+            "but the problem is",
+            "but i'm not sure",
+            "but i think",
+            "but i don't think",
+            # alternatives / opposition
             "on the other hand",
-            "alternative",
+            "alternatively",
+            "another approach would be",
+            "instead we should",
+            "i propose a different",
             "pushback",
+            "my pushback is",
+            "i have some pushback",
+            # indirect disagreement
+            "i see it differently",
+            "i have a different view",
+            "i have another perspective",
+            "that's one way to see it",
+            "from my perspective",
+            "i respectfully disagree",
+            "i'm not aligned",
+            "misaligned",
         ]
 
         disagreements = []
@@ -239,18 +291,66 @@ class KeyMomentsNode:
         Keywords: exactly, absolutely, makes sense, good point, I agree, etc.
         """
         agreement_keywords = [
+            # strong / explicit agreement
             "exactly",
             "absolutely",
-            "agree",
-            "makes sense",
-            "good point",
-            "right",
-            "correct",
+            "definitely",
+            "for sure",
+            "totally",
+            "completely agree",
+            "i completely agree",
+            "i agree",
+            "i strongly agree",
+            "i fully agree",
+            "i'm aligned",
+            "we're aligned",
+            "aligned with that",
+            # confirming / approving language
             "yes",
-            "perfect",
+            "yeah",
+            "yep",
+            "yup",
+            "correct",
+            "right",
+            "that's right",
+            "true",
+            "that's true",
+            "good point",
+            "great point",
+            "valid point",
+            "fair point",
+            "that's fair",
+            # supportive corporate noises
+            "makes sense",
+            "that makes sense",
+            "totally makes sense",
+            "agreed",
             "sounds good",
+            "sounds great",
+            "that's good",
             "that works",
-            "I'm on board",
+            "works for me",
+            "fine by me",
+            "i'm good with that",
+            "i'm on board",
+            "i'm okay with that",
+            # approving decisions / direction
+            "let's do it",
+            "love it",
+            "i like that",
+            "i like this",
+            "i'm in",
+            "i support this",
+            "i support that",
+            "i'm supportive",
+            # soft polite agreement
+            "i think you're right",
+            "i think that's right",
+            "seems right",
+            "seems good",
+            "seems reasonable",
+            "i can go with that",
+            "i can work with that",
         ]
 
         agreements = []
