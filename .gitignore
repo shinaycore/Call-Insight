@@ -12,7 +12,7 @@ test_output/
 *.wav
 *.mp3
 *.log
-*.txt
+#*.txt
 *.webm
 
 # generated outputs
@@ -23,3 +23,5 @@ topic_results/
 merged_results/
 cache_topics/
 reports/
+
+testing_node.py
